@@ -22,41 +22,97 @@ func isOdd(a *big.Int) bool {
 	return a.Bit(0) == 1
 }
 
-// decompressPoint decompresses a point on the given curve given the X point and
+// decompressPoint decompresses a point on the secp256k1 curve given the X point and
 // the solution to use.
-func decompressPoint(curve *KoblitzCurve, x *big.Int, ybit bool) (*big.Int, error) {
-	// TODO: This will probably only work for secp256k1 due to
-	// optimizations.
+func decompressPoint(curve *KoblitzCurve, bigX *big.Int, ybit bool) (*big.Int, error) {
+	var x fieldVal
+	x.SetByteSlice(bigX.Bytes())
 
-	// Y = +-sqrt(x^3 + B)
-	x3 := new(big.Int).Mul(x, x)
-	x3.Mul(x3, x)
-	x3.Add(x3, curve.Params().B)
-	x3.Mod(x3, curve.Params().P)
+	// Compute x^3 + B mod p.
+	var x3 fieldVal
+	x3.SquareVal(&x)
+	x3.Mul(&x).Add(curve.FieldB()).Normalize()
 
 	// Now calculate sqrt mod p of x^3 + B
 	// This code used to do a full sqrt based on tonelli/shanks,
 	// but this was replaced by the algorithms referenced in
 	// https://bitcointalk.org/index.php?topic=162805.msg1712294#msg1712294
-	y := new(big.Int).Exp(x3, curve.QPlus1Div4(), curve.Params().P)
-
-	if ybit != isOdd(y) {
-		y.Sub(curve.Params().P, y)
+	var y fieldVal
+	sqrt(curve, &y, &x3)
+	if ybit != y.IsOdd() {
+		y.Negate(1)
 	}
+	y.Normalize()
 
 	// Check that y is a square root of x^3 + B.
-	y2 := new(big.Int).Mul(y, y)
-	y2.Mod(y2, curve.Params().P)
-	if y2.Cmp(x3) != 0 {
+	var y2 fieldVal
+	y2.SquareVal(&y).Normalize()
+	if !y2.Equals(&x3) {
 		return nil, fmt.Errorf("invalid square root")
 	}
 
 	// Verify that y-coord has expected parity.
-	if ybit != isOdd(y) {
+	if ybit != y.IsOdd() {
 		return nil, fmt.Errorf("ybit doesn't match oddness")
 	}
 
-	return y, nil
+	return new(big.Int).SetBytes(y.Bytes()[:]), nil
+}
+
+// sqrt computes the square root of x modulo the curve's prime, and stores
+// the result in res. The square root is computed via exponentiation of x by the
+// value (P+1)/4 using the curve's precomputed representations of the exponent.
+// This method uses square-and-multiply exponentiation over fieldVals to improve
+// performance.
+//
+// NOTE: This method only works when P is intended to be the secp256k1 prime and
+// is not constant time. The returned value is of magnitude 1, but is
+// denormalized.
+func sqrt(curve *KoblitzCurve, res, x *fieldVal) {
+	expBytes := curve.QBytes()
+	expBitLen := curve.QBitLen()
+
+	// Since expBytes is big-endian, compute the number of zero bits in the
+	// first byte that should be skipped. Failure to do so will result in
+	// incorrectly doubling the result up to 7 extra times.
+	offset := 8*len(expBytes) - expBitLen
+
+	// The following computation iteratively computes x^((Q+1)/4) using the
+	// recursive, piece-wise definition:
+	//
+	//   x^n = (x^2)^(n/2) mod P       if n is even
+	//   x^n = x(x^2)^(n-1/2) mod P    if n is odd
+	//
+	// Given n in its big-endian representation b_k, ..., b_0, x^n can be
+	// computed by defining the sequence r_k+1, ..., r_0, where:
+	//
+	//   r_k+1 = 1
+	//   r_i   = (r_i+1)^2 * x^b_i    for i = k, ..., 0
+	//
+	// The final value r_0 = x^n.
+	//
+	// See https://en.wikipedia.org/wiki/Exponentiation_by_squaring for more
+	// details.
+	res.SetInt(1)
+	for i := offset; i < offset+expBitLen; i++ {
+		// On all but the first iteration, square the result of the
+		// prior iteration. On the first pass, (r_k+1)^2 = 1^2 = 1.
+		if i > offset {
+			res.Square()
+		}
+
+		// Extract target bit b_i from the big-endian exponent bytes.
+		bytIdx := i / 8
+		bitIdx := i % 8
+		bit := (expBytes[bytIdx] >> uint(7-bitIdx)) & 0x01
+
+		// If this bit of the exponent is set, multiply the running
+		// total by x, leaving r_i = x*(r_i+1)^2. Otherwise, when the
+		// bit is not set, this leaves r_i = 1*(r_i+1)^2 as required.
+		if bit > 0 {
+			res.Mul(x)
+		}
+	}
 }
 
 const (

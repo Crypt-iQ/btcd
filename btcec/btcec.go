@@ -36,9 +36,24 @@ var (
 // interface from crypto/elliptic.
 type KoblitzCurve struct {
 	*elliptic.CurveParams
-	q         *big.Int
+
+	// q is the value (P+1)/4 use to compute the square root of field
+	// elements.
+	q *big.Int
+
+	// qBytes is a big-endian bytes slice of (P+1)4, used to compute the
+	// square root of field elements via exponentiation.
+	qBytes []byte
+
+	// qBitLen is the bit-length of (P+1)4, used to compute the square root
+	// of field elements via exponentiation.
+	qBitLen int
+
 	H         int      // cofactor of the curve.
 	halfOrder *big.Int // half the order N
+
+	// fieldB is the constant B of the curve as a fieldVal.
+	fieldB *fieldVal
 
 	// byteSize is simply the bit size / 8 and is provided for convenience
 	// since it is calculated repeatedly.
@@ -885,6 +900,23 @@ func (curve *KoblitzCurve) QPlus1Div4() *big.Int {
 	return curve.q
 }
 
+// QBytes returns a big-endian byte slice of (Q+1)/4 for the curve for use in
+// calculating square roots via exponentiation.
+func (curve *KoblitzCurve) QBytes() []byte {
+	return curve.qBytes
+}
+
+// QBitLen returns a bit-length of (Q+1)/4 for the curve for use in calculating
+// square roots via exponentiation.
+func (curve *KoblitzCurve) QBitLen() int {
+	return curve.qBitLen
+}
+
+// FieldB returns the constant B of the curve as a fieldVal.
+func (curve *KoblitzCurve) FieldB() *fieldVal {
+	return curve.fieldB
+}
+
 var initonce sync.Once
 var secp256k1 KoblitzCurve
 
@@ -915,8 +947,11 @@ func initS256() {
 	secp256k1.BitSize = 256
 	secp256k1.q = new(big.Int).Div(new(big.Int).Add(secp256k1.P,
 		big.NewInt(1)), big.NewInt(4))
+	secp256k1.qBytes = secp256k1.q.Bytes()
+	secp256k1.qBitLen = secp256k1.q.BitLen()
 	secp256k1.H = 1
 	secp256k1.halfOrder = new(big.Int).Rsh(secp256k1.N, 1)
+	secp256k1.fieldB = new(fieldVal).SetByteSlice(secp256k1.B.Bytes())
 
 	// Provided for convenience since this gets computed repeatedly.
 	secp256k1.byteSize = secp256k1.BitSize / 8
