@@ -45,10 +45,6 @@ type KoblitzCurve struct {
 	// square root of field elements via exponentiation.
 	qBytes []byte
 
-	// qBitLen is the bit-length of (P+1)4, used to compute the square root
-	// of field elements via exponentiation.
-	qBitLen int
-
 	H         int      // cofactor of the curve.
 	halfOrder *big.Int // half the order N
 
@@ -916,12 +912,6 @@ func (curve *KoblitzCurve) QBytes() []byte {
 	return curve.qBytes
 }
 
-// QBitLen returns a bit-length of (Q+1)/4 for the curve for use in calculating
-// square roots via exponentiation.
-func (curve *KoblitzCurve) QBitLen() int {
-	return curve.qBitLen
-}
-
 // FieldB returns the constant B of the curve as a fieldVal.
 func (curve *KoblitzCurve) FieldB() *fieldVal {
 	return curve.fieldB
@@ -958,7 +948,6 @@ func initS256() {
 	secp256k1.q = new(big.Int).Div(new(big.Int).Add(secp256k1.P,
 		big.NewInt(1)), big.NewInt(4))
 	secp256k1.qBytes = secp256k1.q.Bytes()
-	secp256k1.qBitLen = secp256k1.q.BitLen()
 	secp256k1.H = 1
 	secp256k1.halfOrder = new(big.Int).Rsh(secp256k1.N, 1)
 	secp256k1.fieldB = new(fieldVal).SetByteSlice(secp256k1.B.Bytes())

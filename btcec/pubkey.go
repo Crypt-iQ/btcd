@@ -61,24 +61,18 @@ func decompressPoint(curve *KoblitzCurve, bigX *big.Int, ybit bool) (*big.Int, e
 
 // sqrt computes the square root of x modulo the curve's prime, and stores
 // the result in res. The square root is computed via exponentiation of x by the
-// value (P+1)/4 using the curve's precomputed representations of the exponent.
-// This method uses square-and-multiply exponentiation over fieldVals to improve
-// performance.
+// value Q = (P+1)/4 using the curve's precomputed big-endian representation of
+// the Q.  This method uses a modified version of square-and-multiply
+// exponentiation over secp256k1 fieldVals to operate on bytes instead of bits,
+// which offers better performance over both big.Int exponentiation and bit-wise
+// square-and-multiply.
 //
 // NOTE: This method only works when P is intended to be the secp256k1 prime and
 // is not constant time. The returned value is of magnitude 1, but is
 // denormalized.
 func sqrt(curve *KoblitzCurve, res, x *fieldVal) {
-	expBytes := curve.QBytes()
-	expBitLen := curve.QBitLen()
-
-	// Since expBytes is big-endian, compute the number of zero bits in the
-	// first byte that should be skipped. Failure to do so will result in
-	// incorrectly doubling the result up to 7 extra times.
-	offset := 8*len(expBytes) - expBitLen
-
-	// The following computation iteratively computes x^((Q+1)/4) using the
-	// recursive, piece-wise definition:
+	// The following computation iteratively computes x^((P+1)/4) = x^Q
+	// using the recursive, piece-wise definition:
 	//
 	//   x^n = (x^2)^(n/2) mod P       if n is even
 	//   x^n = x(x^2)^(n-1/2) mod P    if n is odd
@@ -93,24 +87,72 @@ func sqrt(curve *KoblitzCurve, res, x *fieldVal) {
 	//
 	// See https://en.wikipedia.org/wiki/Exponentiation_by_squaring for more
 	// details.
+	//
+	// This can be further optimized, by observing that the value of Q in
+	// secp256k1 has the value:
+	//
+	//   Q = 3fffffffffffffffffffffffffffffffffffffffffffffffffffffffbfffff0c
+	//
+	// We can unroll the typical bit-wise interpretation of the
+	// exponentiation algorithm above to instead operate on bytes.
+	// This reduces the number of comparisons from 256*3 = 768 in the
+	// prior bit-wise algorithm, down to (32*2)+1+2+2 = 69, reducing the
+	// overhead of failed branch predictions and additional comparisons.
+	//
+	// Since the there are only 4 unique bytes of Q, this keeps the jump
+	// table small without the need to handle all possible 8-bit values.
+	// Further, we observe that 29 of the 32 bytes are 0xff; making the
+	// first case handle 0xff therefore optimizes the hot path.
 	res.SetInt(1)
-	for i := offset; i < offset+expBitLen; i++ {
-		// On all but the first iteration, square the result of the
-		// prior iteration. On the first pass, (r_k+1)^2 = 1^2 = 1.
-		if i > offset {
-			res.Square()
-		}
+	for _, b := range curve.QBytes() {
+		switch b {
 
-		// Extract target bit b_i from the big-endian exponent bytes.
-		bytIdx := i / 8
-		bitIdx := i % 8
-		bit := (expBytes[bytIdx] >> uint(7-bitIdx)) & 0x01
+		// Most common case, where all 8 bits are set.
+		case 0xff:
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
 
-		// If this bit of the exponent is set, multiply the running
-		// total by x, leaving r_i = x*(r_i+1)^2. Otherwise, when the
-		// bit is not set, this leaves r_i = 1*(r_i+1)^2 as required.
-		if bit > 0 {
+		// First byte of Q, where all but the top two bits are set. Note
+		// that this case only applies six operations, since the highest
+		// bit of Q resides in bit six of the first byte. We ignore the
+		// first two bytes, since squaring for these bits will result in
+		// an invalid result. We forgo squaring res on the first bit,
+		// since 1^2 = 1.
+		case 0x3f:
 			res.Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+
+		// Byte 28 of Q, where only bit 7 is unset.
+		case 0xbf:
+			res.Square().Mul(x)
+			res.Square()
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+
+		// Byte 31 of Q (0x0c), where only bits 3 and 4 are set.
+		default:
+			res.Square()
+			res.Square()
+			res.Square()
+			res.Square()
+			res.Square().Mul(x)
+			res.Square().Mul(x)
+			res.Square()
+			res.Square()
 		}
 	}
 }
